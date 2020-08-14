@@ -1,51 +1,17 @@
-import pandas as pd
 import tensorflow as tf
+import pandas as pd
 import tensorflow_hub as hub
-import os
-import re
 import numpy as np
-from bert import bert_tokenization
+from bert.tokenization import FullTokenizer
 from tqdm import tqdm
 from tensorflow.keras import backend as K
 from utils.log import logger
+from utils.df_utils import one_to_many, get_values
+import plac
+from pathlib import Path
 
 # Initialize session
 sess = tf.Session()
-
-
-# Load all files from a directory in a DataFrame.
-def load_directory_data(directory):
-    data = {}
-    data["sentence"] = []
-    data["sentiment"] = []
-    for file_path in os.listdir(directory):
-        with tf.gfile.GFile(os.path.join(directory, file_path), "r") as f:
-            data["sentence"].append(f.read())
-            data["sentiment"].append(re.match("\d+_(\d+)\.txt", file_path).group(1))
-    return pd.DataFrame.from_dict(data)
-
-
-# Merge positive and negative examples, add a polarity column and shuffle.
-def load_dataset(directory):
-    pos_df = load_directory_data(os.path.join(directory, "pos"))
-    neg_df = load_directory_data(os.path.join(directory, "neg"))
-    pos_df["polarity"] = 1
-    neg_df["polarity"] = 0
-    return pd.concat([pos_df, neg_df]).sample(frac=1).reset_index(drop=True)
-
-
-# Download and process the dataset files.
-def download_and_load_datasets(force_download=False):
-    dataset = tf.keras.utils.get_file(
-        fname="aclImdb.tar.gz",
-        origin="http://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz",
-        extract=True,
-    )
-
-    train_df = load_dataset(os.path.join(os.path.dirname(dataset), "aclImdb", "train"))
-    test_df = load_dataset(os.path.join(os.path.dirname(dataset), "aclImdb", "test"))
-
-    return train_df, test_df
 
 
 class PaddingInputExample(object):
@@ -87,7 +53,7 @@ def create_tokenizer_from_hub_module(bert_path):
         [tokenization_info["vocab_file"], tokenization_info["do_lower_case"]]
     )
 
-    return bert_tokenization.FullTokenizer(vocab_file=vocab_file, do_lower_case=do_lower_case)
+    return FullTokenizer(vocab_file=vocab_file, do_lower_case=do_lower_case)
 
 
 def convert_single_example(tokenizer, example, max_seq_length=128):
@@ -97,7 +63,7 @@ def convert_single_example(tokenizer, example, max_seq_length=128):
         input_ids = [0] * max_seq_length
         input_mask = [0] * max_seq_length
         segment_ids = [0] * max_seq_length
-        label = 0
+        label = [0] * 8
         return input_ids, input_mask, segment_ids, label
 
     tokens_a = tokenizer.tokenize(example.text_a)
@@ -149,7 +115,7 @@ def convert_examples_to_features(tokenizer, examples, max_seq_length=128):
         np.array(input_ids),
         np.array(input_masks),
         np.array(segment_ids),
-        np.array(labels).reshape(-1, 1),
+        np.array(labels)
     )
 
 
@@ -168,7 +134,7 @@ class BertLayer(tf.keras.layers.Layer):
         self,
         n_fine_tune_layers=10,
         pooling="mean",
-        bert_path="https://tfhub.dev/google/bert_uncased_L-12_H-768_A-12/1",
+        bert_path="https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1",
         **kwargs,
     ):
         self.n_fine_tune_layers = n_fine_tune_layers
@@ -255,6 +221,14 @@ class BertLayer(tf.keras.layers.Layer):
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.output_size)
 
+    def get_config(self):
+        # For serialization with 'custom_objects'
+        config = super().get_config()
+        config['n_fine_tune_layers'] = self.n_fine_tune_layers
+        config['pooling'] = self.pooling
+        config['bert_path'] = self.bert_path
+        return config
+
 
 # Build model
 def build_model(max_seq_length):
@@ -265,10 +239,10 @@ def build_model(max_seq_length):
 
     bert_output = BertLayer(n_fine_tune_layers=3)(bert_inputs)
     dense = tf.keras.layers.Dense(128, activation="relu")(bert_output)
-    pred = tf.keras.layers.Dense(1, activation="sigmoid")(dense)
+    pred = tf.keras.layers.Dense(8, activation="sigmoid")(dense)
 
     model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
-    model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
+    model.compile(loss="categorical_crossentropy", optimizer="adam", metrics=["accuracy"])
     model.summary()
 
     return model
@@ -281,27 +255,41 @@ def initialize_vars(sess):
     K.set_session(sess)
 
 
-def main():
-    # Params for bert model and tokenization
-    bert_path = "https://tfhub.dev/google/bert_uncased_L-12_H-768_A-12/1"
-    max_seq_length = 128
+@plac.annotations(
+    csv_file=("Path to input csv file", "positional", None, Path),
+    text_column=("Name of text column","option","text_column",str),
+    label_column=("Name of label column", "option", "label_column", str),
+    bert_path=("Bert url", "option", "bert_path", str),
+)
+def main(csv_file, text_column='text', label_column='labels', bert_path="https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1", max_seq_length=128, model_path='/Users/nadjet/tmp/keras-bert'):
 
-
-    logger.info("Downloading and loading datasets...")
-    train_df, test_df = download_and_load_datasets()
-
-
+    df = pd.read_csv(csv_file, sep="\t", header=0)
+    df.columns = ['id','labels','misc','text']
+    df = df[['id','text','labels']]
+    df = df.sample(n=len(df), random_state=42)
+    train_sz = int(len(df)*0.7)
+    #train_df = df[:train_sz]
+    #test_df = df[train_sz:]
+    train_df = df[:100]
+    test_df = df[100:200]
     logger.info("Preprocessing, tokenizing and converting datasets...")
+
     # Create datasets (Only take up to max_seq_length words for memory)
-    train_text = train_df["sentence"].tolist()
+    train_text = train_df[text_column].tolist()
     train_text = [" ".join(t.split()[0:max_seq_length]) for t in train_text]
     train_text = np.array(train_text, dtype=object)[:, np.newaxis]
-    train_label = train_df["polarity"].tolist()
+    train_df = one_to_many(train_df, label_column)
+    labels = get_values(train_df, label_column)
+    train_label = train_df[labels].values
 
-    test_text = test_df["sentence"].tolist()
+
+    test_text = test_df[text_column].tolist()
     test_text = [" ".join(t.split()[0:max_seq_length]) for t in test_text]
     test_text = np.array(test_text, dtype=object)[:, np.newaxis]
-    test_label = test_df["polarity"].tolist()
+    test_df = one_to_many(test_df, label_column)
+    labels = get_values(test_df, label_column)
+    test_label = test_df[labels].values
+
 
     # Instantiate tokenizer
     tokenizer = create_tokenizer_from_hub_module(bert_path)
@@ -310,12 +298,14 @@ def main():
     train_examples = convert_text_to_examples(train_text, train_label)
     test_examples = convert_text_to_examples(test_text, test_label)
 
+
+
     # Convert to features
     (
         train_input_ids,
         train_input_masks,
         train_segment_ids,
-        train_labels,
+        train_label,
     ) = convert_examples_to_features(
         tokenizer, train_examples, max_seq_length=max_seq_length
     )
@@ -323,7 +313,7 @@ def main():
         test_input_ids,
         test_input_masks,
         test_segment_ids,
-        test_labels,
+        test_label,
     ) = convert_examples_to_features(
         tokenizer, test_examples, max_seq_length=max_seq_length
     )
@@ -337,15 +327,22 @@ def main():
     logger.info("Training")
     model.fit(
         [train_input_ids, train_input_masks, train_segment_ids],
-        train_labels,
+        train_label,
         validation_data=(
             [test_input_ids, test_input_masks, test_segment_ids],
-            test_labels,
+            test_label,
         ),
         epochs=1,
-        batch_size=32,
+        batch_size=64,
+        verbose=2
     )
+
+    model.save(model_path)
 
 
 if __name__ == "__main__":
-    main()
+    plac.call(main)
+    model_path = "/Users/nadjet/tmp/keras-bert"
+    model = tf.keras.models.load_model(model_path, custom_objects={'BertLayer': BertLayer})
+    model.summary()
+
