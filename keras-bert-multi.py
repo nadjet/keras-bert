@@ -45,6 +45,11 @@ class InputExample(object):
         self.label = label
 
 
+MODEL_PATH = '/Users/nadjet/tmp/keras-bert'
+BERT_PATH = "https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1"
+MAX_SEQ_LENGTH = 256
+NUM_CLASSES = 8
+
 def create_tokenizer_from_hub_module(bert_path):
     """Get the vocab file and casing info from the Hub module."""
     bert_module = hub.Module(bert_path)
@@ -56,14 +61,14 @@ def create_tokenizer_from_hub_module(bert_path):
     return FullTokenizer(vocab_file=vocab_file, do_lower_case=do_lower_case)
 
 
-def convert_single_example(tokenizer, example, max_seq_length=128):
+def convert_single_example(tokenizer, example, max_seq_length=MAX_SEQ_LENGTH):
     """Converts a single `InputExample` into a single `InputFeatures`."""
 
     if isinstance(example, PaddingInputExample):
         input_ids = [0] * max_seq_length
         input_mask = [0] * max_seq_length
         segment_ids = [0] * max_seq_length
-        label = [0] * 8
+        label = [0] * NUM_CLASSES
         return input_ids, input_mask, segment_ids, label
 
     tokens_a = tokenizer.tokenize(example.text_a)
@@ -99,7 +104,7 @@ def convert_single_example(tokenizer, example, max_seq_length=128):
     return input_ids, input_mask, segment_ids, example.label
 
 
-def convert_examples_to_features(tokenizer, examples, max_seq_length=128):
+def convert_examples_to_features(tokenizer, examples, max_seq_length=MAX_SEQ_LENGTH):
     """Convert a set of `InputExample`s to a list of `InputFeatures`."""
 
     input_ids, input_masks, segment_ids, labels = [], [], [], []
@@ -134,7 +139,7 @@ class BertLayer(tf.keras.layers.Layer):
         self,
         n_fine_tune_layers=10,
         pooling="mean",
-        bert_path="https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1",
+        bert_path=BERT_PATH,
         **kwargs,
     ):
         self.n_fine_tune_layers = n_fine_tune_layers
@@ -238,8 +243,8 @@ def build_model(max_seq_length):
     bert_inputs = [in_id, in_mask, in_segment]
 
     bert_output = BertLayer(n_fine_tune_layers=3)(bert_inputs)
-    dense = tf.keras.layers.Dense(128, activation="relu")(bert_output)
-    pred = tf.keras.layers.Dense(8, activation="sigmoid")(dense)
+    dense = tf.keras.layers.Dense(MAX_SEQ_LENGTH, activation="relu")(bert_output)
+    pred = tf.keras.layers.Dense(NUM_CLASSES, activation="sigmoid")(dense)
 
     model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred)
     model.compile(loss="categorical_crossentropy", optimizer="adam", metrics=["accuracy"])
@@ -261,7 +266,7 @@ def initialize_vars(sess):
     label_column=("Name of label column", "option", "label_column", str),
     bert_path=("Bert url", "option", "bert_path", str),
 )
-def main(csv_file, text_column='text', label_column='labels', bert_path="https://tfhub.dev/google/bert_multi_cased_L-12_H-768_A-12/1", max_seq_length=128, model_path='/Users/nadjet/tmp/keras-bert'):
+def main(csv_file, text_column='text', label_column='labels', bert_path=BERT_PATH, max_seq_length=MAX_SEQ_LENGTH, model_path=MODEL_PATH):
 
     df = pd.read_csv(csv_file, sep="\t", header=0)
     df.columns = ['id','labels','misc','text']
@@ -340,7 +345,6 @@ def main(csv_file, text_column='text', label_column='labels', bert_path="https:/
 
 if __name__ == "__main__":
     plac.call(main)
-    model_path = "/Users/nadjet/tmp/keras-bert"
-    model = tf.keras.models.load_model(model_path, custom_objects={'BertLayer': BertLayer})
+    model = tf.keras.models.load_model(MODEL_PATH, custom_objects={'BertLayer': BertLayer})
     model.summary()
 
