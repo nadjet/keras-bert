@@ -268,10 +268,8 @@ def main(csv_file, text_column='text', label_column='labels', bert_path="https:/
     df = df[['id','text','labels']]
     df = df.sample(n=len(df), random_state=42)
     train_sz = int(len(df)*0.7)
-    #train_df = df[:train_sz]
-    #test_df = df[train_sz:]
-    train_df = df[:100]
-    test_df = df[100:200]
+    train_df = df[:train_sz]
+    test_df = df[train_sz:]
     logger.info("Preprocessing, tokenizing and converting datasets...")
 
     # Create datasets (Only take up to max_seq_length words for memory)
